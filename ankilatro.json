@@ -1,0 +1,18 @@
+{
+	"id": "ankilatro",
+	"name": "Ankilatro",
+	"display_name": "Ankilatro",
+	"author": ["Gephyrro - OneFourBrandon on Github"],
+	"description": "A mod that integrates studying your Anki cards into a game of Balatro",
+	"prefix": "ankilatro",
+	"main_file": "ankilatro.lua",
+	"priority": 0,
+	"badge_colour": "3461eb",
+	"badge_text_colour": "181a21",
+	"version": "0.0.1~a",
+	"dependencies": [
+		"Steamodded (>=1.0.0~BETA-1016c)",
+    	"Lovely (>=0.8)",
+    	"Balatro (>=1.0.1o)"
+	]
+}

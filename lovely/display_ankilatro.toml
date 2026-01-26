@@ -1,0 +1,15 @@
+[manifest]
+version = "1.0.0"
+priority = 0
+
+# Ripped from BalatroMultiplayer end_round.toml
+[[patches]]
+[patches.pattern]
+target = "functions/state_events.lua"
+pattern = ''''''
+position = 'at'
+payload = '''
+
+'''
+match_indent = true
+times = 1
