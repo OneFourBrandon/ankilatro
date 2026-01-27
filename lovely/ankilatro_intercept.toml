@@ -1,0 +1,32 @@
+[manifest]
+version = "1.0.0"
+priority = 0
+
+# Intercept round eval over -> shop and replace with ankilatro, set ankilatro to go to shop
+[[patches]]
+[patches.pattern]
+target = "functions/button_callbacks.lua"
+pattern = '''G.STATE = G.STATES.SHOP'''
+position = 'at'
+# At some point make it G.STATE = ankilatro_enabled and G.STATES.ANKILATRO or G.STATES.SHOP
+payload = '''G.STATE = G.STATES.ANKILATRO'''
+match_indent = true
+times = 1
+
+# Append Ankilatro state to Game:update
+[[patches]]
+[patches.pattern]
+target = "game.lua"
+pattern = '''
+if self.STATE == self.STATES.SHOP then 
+            self:update_shop(dt)
+end
+'''
+position = 'after'
+payload = '''
+if self.STATE == self.STATES.ANKILATRO then 
+            self:update_ankilatro(dt)
+end
+'''
+match_indent = true
+times = 1

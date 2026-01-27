@@ -1,0 +1,14 @@
+[manifest]
+version = "1.0.0"
+priority = 0
+
+# Hardcoded CardArea being visible in the cardarea.lua function is crazy - this fixes it when the state is ankilatro
+[[patches]]
+[patches.regex]
+target = "cardarea.lua"
+pattern = '\[G.STATES.BLIND_SELECT\]=1}\)\[state\]'
+position = "at"
+# We replace it with BLIND_SELECT + ANKILATRO + closing brace
+payload = "[G.STATES.BLIND_SELECT]=1, [G.STATES.ANKILATRO]=1})[state]"
+match_indent = true
+times = 1
