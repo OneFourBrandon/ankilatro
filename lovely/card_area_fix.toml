@@ -2,7 +2,7 @@
 version = "1.0.0"
 priority = 0
 
-# Hardcoded CardArea being visible in the cardarea.lua function is crazy - this fixes it when the state is ankilatro
+# Hardcoded CardArea being visible in the cardarea.lua function
 [[patches]]
 [patches.regex]
 target = "cardarea.lua"
