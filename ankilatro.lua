@@ -1,4 +1,5 @@
 local http = require("socket.http")
+local socket = require("socket")
 local ltn12 = require("ltn12")
 local mod_path = SMODS.current_mod.path
 package.path = package.path .. ";" .. mod_path .. "?.lua"
@@ -268,6 +269,13 @@ end
 
 -- Fetches a random pending Anki Card from AnkiConnect and fills in the globals BACK, FRONT, ISCLOZE, REVEALED
 function fetch_anki_card()
+    -- CHECK CONNECTION
+    if not akl_check_connection() then
+        if LOCAL_DEBUGGING then print("Anki is not running. Exiting state.") end
+        return akl_exit() -- Exit back to shop immediately
+    end
+
+
     -- Check if we have any remaining cards to fetch
     if G.ANKILATRO.CARD.REMAINING == 0 then
         return akl_exit()
@@ -388,13 +396,7 @@ end
 function akl_parse_cloze_front(str, cloze_order)
 local target_ord = tostring(cloze_order)
 
-    -- Pattern explanation:
-    -- {{c        -> Match start of cloze tag
-    -- (%d+)      -> Capture the cloze ID (e.g., 1, 2)
-    -- ::         -> Match the separator
-    -- ([^}]-)    -> Capture content (non-greedy, stops at '}', allows newlines)
-    -- }}         -> Match end of cloze tag
-    local pattern = "{{c(%d+)::([^}]-)}}"
+    local pattern = "{{c(%d+)::(.-)}}"
 
     -- Helper to split "Answer::Hint" into ("Answer", "Hint")
     local function get_content_and_hint(inner_text)
@@ -500,6 +502,25 @@ function akl_clean_html(str)
     str = str:gsub("<.->", "")
     
     return str
+end
+
+
+-- Checks to make sure ankilatro is running
+function akl_check_connection()
+    local client = socket.tcp()
+    client:settimeout(0.005) -- Set timeout to 50 milliseconds
+    local host, port = ac_url:match("://(.-):(%d+)")
+
+    -- Try to connect to localhost:8765
+    local connection, err = client:connect(host, port)
+    
+    if connection then
+        client:close()
+        return true
+    else
+        if LOCAL_DEBUGGING then print("Anki Connection Failed: " .. tostring(err)) end
+        return false
+    end
 end
 
 -- Exits ankilatro, returns false as exitcode
