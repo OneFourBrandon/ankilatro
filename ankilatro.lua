@@ -1,3 +1,4 @@
+-- Future SMODS has http so switch to that
 local http = require("socket.http")
 local socket = require("socket")
 local ltn12 = require("ltn12")
