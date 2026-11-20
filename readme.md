@@ -18,6 +18,7 @@ When you press the Cash Out button, *three* Anki cards will be presented for you
 Completed cards will not immediately reflect as updated in Anki. To refresh their status, return to Anki and click the Decks button.
 
 ## Current Limitations
+- MathJax (`\(...\)` inline and `\[...\]` display) is rendered by a built-in LaTeX layout engine (`lib/akl_math.lua`). Common math (fractions, roots, scripts, sums/integrals, Greek, `\mathbb`, matrices, `cases`, `aligned`, `\left...\right`, accents) is supported; unsupported commands are shown in red as the raw `\command`.
 
 
 ## Future Updates
@@ -29,7 +30,7 @@ Completed cards will not immediately reflect as updated in Anki. To refresh thei
 	      
 - [ ] Create own lovely text object with font that supports line wrapping and dynamic colouring
 - [ ] Add threading to the ankiconnect check so that the game doesn't hitch when not running
-- [ ] Mathjax? May not be possible in Love
+- [x] Mathjax
 
 
 

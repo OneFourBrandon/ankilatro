@@ -5,6 +5,7 @@ local ltn12 = require("ltn12")
 local mod_path = SMODS.current_mod.path
 package.path = package.path .. ";" .. mod_path .. "?.lua"
 local json = require("lib.json")
+local akl_math = require("lib.akl_math")
 
 local LOCAL_DEBUGGING = true
 
@@ -392,98 +393,103 @@ end
 
 -- Returns an array with 2 strings, Front and Front_alt
 -- RETURNS:
--- Front: Contains ... in place of current cloze, with all other clozes visible 
+-- Front: Contains [...] in place of current cloze, with all other clozes visible
 -- Front_alt: Front of card with all clozes visible
 function akl_parse_cloze_front(str, cloze_order)
-local target_ord = tostring(cloze_order)
-
-    local pattern = "{{c(%d+)::(.-)}}"
+    local target_ord = tostring(cloze_order)
 
     -- Helper to split "Answer::Hint" into ("Answer", "Hint")
+    -- Only a "::" outside of braces counts, so nested clozes keep their own "::"
     local function get_content_and_hint(inner_text)
-        local s, e = inner_text:find("::")
-        if s then
-            return inner_text:sub(1, s-1), inner_text:sub(e+1)
-        else
-            return inner_text, nil
+        local depth = 0
+        local i = 1
+        while i < #inner_text do
+            local c = inner_text:sub(i, i)
+            if c == "{" then
+                depth = depth + 1
+            elseif c == "}" then
+                if depth > 0 then depth = depth - 1 end
+            elseif c == ":" and depth == 0 and inner_text:sub(i+1, i+1) == ":" then
+                return inner_text:sub(1, i-1), inner_text:sub(i+2)
+            end
+            i = i + 1
         end
+        return inner_text, nil
     end
 
-    -- 1. Generate Front (Hide active cloze)
-    local front = str:gsub(pattern, function(id, content)
-        local text, hint = get_content_and_hint(content)
+    -- Finds the "}}" that closes a cloze whose content starts at content_start.
+    -- Braces are balanced so MathJax like {{c1::\frac{a}{b}}} closes at the right place.
+    local function find_cloze_end(content_start)
+        local depth = 0
+        local i = content_start
+        while i <= #str do
+            local c = str:sub(i, i)
+            if c == "\\" then
+                i = i + 1 -- skip escaped character (e.g. \{ )
+            elseif c == "{" then
+                depth = depth + 1
+            elseif c == "}" then
+                if depth == 0 and str:sub(i+1, i+1) == "}" then return i end
+                if depth > 0 then depth = depth - 1 end
+            end
+            i = i + 1
+        end
+        -- Unbalanced braces, fall back to the first "}}" like Anki does
+        return str:find("}}", content_start, true)
+    end
+
+    -- Math regions, so a hidden cloze inside MathJax can be rendered as \text{[...]}
+    local math_regions = akl_math.segment_positions(str)
+    local function in_math(pos)
+        for _, r in ipairs(math_regions) do
+            if pos > r[1] and pos < r[2] then return true end
+        end
+        return false
+    end
+
+    local front_parts, alt_parts = {}, {}
+    local pos = 1
+    while true do
+        local s, e, id = str:find("{{c(%d+)::", pos)
+        if not s then break end
+        local close = find_cloze_end(e + 1)
+        if not close then break end
+
+        local text, hint = get_content_and_hint(str:sub(e + 1, close - 1))
+        table.insert(front_parts, str:sub(pos, s - 1))
+        table.insert(alt_parts, str:sub(pos, s - 1))
 
         if id == target_ord then
-            -- Active Cloze: Hide it
-            -- If a hint exists, show [Hint], otherwise [...]
-            if hint then
-                return "[" .. hint .. "]"
-            else
-                return "[...]"
-            end
+            -- Active Cloze: Hide it. If a hint exists, show [Hint], otherwise [...]
+            local hidden = "[" .. (hint or "...") .. "]"
+            if in_math(s) then hidden = "\\text{" .. hidden .. "}" end
+            table.insert(front_parts, hidden)
         else
             -- Inactive Cloze: Show the text
-            return text
+            table.insert(front_parts, text)
         end
-    end)
+        table.insert(alt_parts, text)
+        pos = close + 2
+    end
+    table.insert(front_parts, str:sub(pos))
+    table.insert(alt_parts, str:sub(pos))
 
-    -- 2. Generate Front_alt (Reveal everything)
-    local front_alt = str:gsub(pattern, function(id, content)
-        local text, _ = get_content_and_hint(content)
-        return text
-    end)
+    local front = table.concat(front_parts)
+    local front_alt = table.concat(alt_parts)
+
+    -- Nested clozes: resolve any that are left over
+    if front:find("{{c%d+::") and front ~= str then front = akl_parse_cloze_front(front, cloze_order)[1] end
+    if front_alt:find("{{c%d+::") and front_alt ~= str then front_alt = akl_parse_cloze_front(front_alt, cloze_order)[2] end
 
     return {front, front_alt}
 end
 
 
--- LINE WRAP FUNCTIONS - FUTURE: Make custom font with LOVE Word Wrapping
-
-
-function akl_wrap_text(str, max_chars)
-    local lines = {}
-    local current_line = ""
-    for word in str:gmatch("%S+") do
-        if #current_line + #word + 1 > max_chars then
-            table.insert(lines, current_line)
-            current_line = word
-        else
-            current_line = (#current_line > 0) and (current_line .. " " .. word) or word
-        end
-    end
-    if #current_line > 0 then table.insert(lines, current_line) end
-    return lines
-end
-
-
+-- TEXT + MATHJAX RENDERING - see lib/akl_math.lua
+-- Wraps text to roughly max_width characters per line and renders any MathJax
+-- (\( \) inline, \[ \] display) with Balatro UI nodes.
 function akl_create_wrapped_text_node(text_content, max_width, text_scale)
-    local wrapped_lines = akl_wrap_text(text_content, max_width)
-    local rows = {}
-
-    for _, line in ipairs(wrapped_lines) do
-        table.insert(rows, {
-            n = G.UIT.R, -- Force a NEW ROW for every line
-            config = { align = "cm", padding = 0.05 },
-            nodes = {
-                {
-                    n = G.UIT.T,
-                    config = {
-                        text = line,
-                        scale = text_scale or 0.35,
-                        colour = G.C.WHITE,
-                        shadow = false
-                    }
-                }
-            }
-        })
-    end
-
-    -- Return a Column containing all the Rows
-    return {
-        n = G.UIT.C, 
-        config = { align = "cm", padding = 0.05 },
-        nodes = rows
-    }
+    return akl_math.create_text_node(text_content or "", max_width, text_scale)
 end
 
 
@@ -501,8 +507,44 @@ function akl_clean_html(str)
     
     -- Strip all other HTML tags (anything between < and >) - this may break some things we'll see
     str = str:gsub("<.->", "")
-    
+
+    -- Decode HTML entities (Anki stores < > & in MathJax as &lt; &gt; &amp;)
+    str = akl_decode_entities(str)
+
     return str
+end
+
+
+local HTML_ENTITIES = {
+    lt = "<", gt = ">", quot = '"', apos = "'", nbsp = " ", amp = "&",
+    times = "×", divide = "÷", plusmn = "±", deg = "°", middot = "·", hellip = "…",
+    ndash = "–", mdash = "—", lsquo = "‘", rsquo = "’", ldquo = "“", rdquo = "”",
+    le = "≤", ge = "≥", ne = "≠", minus = "−", rarr = "→", larr = "←", harr = "↔",
+}
+
+local function akl_utf8_char(cp)
+    if cp < 0x80 then return string.char(cp)
+    elseif cp < 0x800 then return string.char(0xC0 + math.floor(cp/0x40), 0x80 + cp%0x40)
+    elseif cp < 0x10000 then return string.char(0xE0 + math.floor(cp/0x1000), 0x80 + math.floor(cp/0x40)%0x40, 0x80 + cp%0x40)
+    elseif cp < 0x110000 then return string.char(0xF0 + math.floor(cp/0x40000), 0x80 + math.floor(cp/0x1000)%0x40, 0x80 + math.floor(cp/0x40)%0x40, 0x80 + cp%0x40)
+    end
+    return ""
+end
+
+-- Decodes &name; &#123; and &#x1F; entities in a single pass (so "&amp;lt;" stays "&lt;")
+function akl_decode_entities(str)
+    return (str:gsub("&(#?[xX]?)(%w+);", function(prefix, body)
+        if prefix == "#" then
+            local cp = tonumber(body)
+            if cp then return akl_utf8_char(cp) end
+        elseif prefix == "#x" or prefix == "#X" then
+            local cp = tonumber(body, 16)
+            if cp then return akl_utf8_char(cp) end
+        elseif prefix == "" and HTML_ENTITIES[body] then
+            return HTML_ENTITIES[body]
+        end
+        return nil -- leave unknown entities untouched
+    end))
 end
 
 
