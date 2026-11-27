@@ -20,6 +20,17 @@
 --   M.create_text_node(text, max_chars, scale)    -> UI node (G.UIT.C) with wrapped text + math
 
 local M = {}
+local markdown = require("lib.markdown")
+-- Internal token for the active deletion. A literal "[...]" elsewhere stays ordinary text.
+M.cloze_placeholder = '\31'
+M.cloze_start = '\26'
+M.cloze_end = '\25'
+local cloze_marks = '[' .. M.cloze_start .. M.cloze_end .. ']'
+
+local function cloze_depth(depth, mark)
+    if mark == M.cloze_start then return depth + 1 end
+    return math.max(0, depth - 1)
+end
 
 M.MATH_SCALE = 0.8     -- GoNoto has larger glyphs than m6x11; this matches cap heights
 M.SCRIPT_RATIO = 0.7   -- size of super/subscripts relative to the base
@@ -241,15 +252,21 @@ end
 
 -- Returns the next token without consuming it.
 function Parser:peek()
-    local save = self.i
+    local save, depth = self.i, self.cloze_depth
     local tok = self:next()
-    self.i = save
+    self.i, self.cloze_depth = save, depth
     return tok
 end
 
 function Parser:next()
     self:skip_ws()
-    local s, i = self.s, self.i
+    local s = self.s
+    while s:sub(self.i, self.i):match(cloze_marks) do
+        self.cloze_depth = cloze_depth(self.cloze_depth, s:sub(self.i, self.i))
+        self.i = self.i + 1
+        self:skip_ws()
+    end
+    local i = self.i
     if i > #s then return nil end
     local c = s:sub(i, i)
     if c == '\\' then
@@ -469,17 +486,20 @@ end
 function Parser:parse_atom()
     local tok = self:next()
     if not tok then return nil end
+    local highlighted = self.cloze_depth > 0
+    local atom
     if tok.t == '{' then
         local list = self:parse_list({ brace = true })
         local close = self:peek()
         if close and close.t == '}' then self:next() end
         return { k = 'group', list = list }
     elseif tok.t == 'char' then
-        return self:char_atom(tok.v)
+        atom = self:char_atom(tok.v)
     elseif tok.t == 'cmd' then
-        return self:command(tok.v)
+        atom = self:command(tok.v)
     end
-    return nil
+    if atom then atom.highlighted = highlighted end
+    return atom
 end
 
 function Parser:parse_env(name)
@@ -560,6 +580,7 @@ function Parser:command(name)
     end
     if TEXT_CMDS[name] then
         local raw = self:raw_group()
+        for mark in raw:gmatch(cloze_marks) do self.cloze_depth = cloze_depth(self.cloze_depth, mark) end
         raw = raw:gsub('\\{', '\1'):gsub('\\}', '\2')            -- protect escaped braces
             :gsub('\\([%%%$#&_ ])', '%1'):gsub('\\%a+%s*', ''):gsub('[{}]', '')
             :gsub('\1', '{'):gsub('\2', '}')
@@ -672,8 +693,8 @@ function Parser:command(name)
     return { k = 'text', text = '\\' .. name, err = true }
 end
 
-function M.parse(tex)
-    local p = setmetatable({ s = tex or '', i = 1 }, Parser)
+function M.parse(tex, depth)
+    local p = setmetatable({ s = tex or '', i = 1, cloze_depth = depth or 0 }, Parser)
     local list = {}
     -- parse_list stops on stray tokens like } / \right / & which we skip here
     while true do
@@ -754,19 +775,39 @@ function M.math_font()
 end
 
 local function measure(str, scale, font)
+    str = str:gsub(M.cloze_placeholder, '[...]'):gsub(cloze_marks, '')
     local w = font.FONT:getWidth(str) * font.squish * scale * font.FONTSCALE / G.TILESIZE
     local h = font.FONT:getHeight() * scale * font.FONTSCALE * font.TEXT_HEIGHT_SCALE / G.TILESIZE
     return w, h
 end
 M.measure = measure
 
+local function text_nodes(str, scale, font, colour)
+    local nodes = {}
+    local function add(text, tint)
+        nodes[#nodes + 1] = { n = G.UIT.T, config = { text = text, scale = scale, font = font, colour = tint, shadow = false } }
+    end
+    local pos, depth = 1, 0
+    local blue = colour == G.C.CLEAR and colour or G.C.BLUE
+    for index, mark in str:gmatch('()([' .. M.cloze_placeholder .. M.cloze_start .. M.cloze_end .. '])') do
+        if pos < index then add(str:sub(pos, index - 1), depth > 0 and blue or colour) end
+        if mark == M.cloze_placeholder then add('[...]', blue) else depth = cloze_depth(depth, mark) end
+        pos = index + 1
+    end
+    if pos <= #str then add(str:sub(pos), depth > 0 and blue or colour) end
+    return nodes
+end
+
 -- Box constructors. A box is { node = <UI definition>, w = width, h = height, cls = class }
 local function text_box(str, ctx, scale, cls)
     if str == '' then str = ' ' end
     scale = scale or ctx.scale
     local w, h = measure(str, scale, ctx.font)
+    local nodes = text_nodes(str, scale, ctx.font, ctx.colour)
     return {
-        node = { n = G.UIT.T, config = { text = str, scale = scale, colour = ctx.colour, font = ctx.font, shadow = false } },
+        node = #nodes == 1 and nodes[1] or { n = G.UIT.C, config = {align = 'cm'}, nodes = {
+            { n = G.UIT.R, config = {align = 'cm', padding = 0}, nodes = nodes }
+        }},
         w = w, h = h, cls = cls,
     }
 end
@@ -971,6 +1012,9 @@ local function render_matrix(atom, ctx)
 end
 
 render_atom = function(atom, ctx)
+    if atom.highlighted and ctx.colour ~= G.C.CLEAR then
+        ctx = child_ctx(ctx, { colour = G.C.BLUE })
+    end
     local k = atom.k
     if k == 'sym' then
         if atom.empty then
@@ -1108,7 +1152,7 @@ render_atom = function(atom, ctx)
 end
 
 -- Render a TeX string to a box
-function M.render(tex, scale, display, colour)
+function M.render(tex, scale, display, colour, depth)
     local ctx = {
         scale = scale,
         min_scale = scale * M.MIN_RATIO,
@@ -1119,7 +1163,7 @@ function M.render(tex, scale, display, colour)
         style = nil,
     }
     local ok, result = pcall(function()
-        local list = M.parse(tex)
+        local list = M.parse(tex, depth)
         return render_list(list, ctx)
     end)
     if ok and result then return result end
@@ -1133,40 +1177,67 @@ end
 ----------------------------------------------------------------------------
 
 -- Split text into tokens: words, math chunks and hard line breaks
-local function tokenize(str)
+local function tokenize(str, use_markdown)
     local tokens = {}
-    local pending_space = false
-    for _, seg in ipairs(M.segment(str)) do
-        if seg.type == 'math' then
-            if seg.display then
-                tokens[#tokens + 1] = { kind = 'display', tex = seg.tex }
-                pending_space = false
-            else
-                tokens[#tokens + 1] = { kind = 'math', tex = seg.tex, space = pending_space }
-                pending_space = false
-            end
-        else
-            local s = seg.text
-            local i = 1
-            while i <= #s do
-                local ws_s, ws_e = s:find('^%s+', i)
-                if ws_s then
-                    if s:sub(ws_s, ws_e):find('\n') then
-                        tokens[#tokens + 1] = { kind = 'break' }
-                        pending_space = false
-                    else
-                        pending_space = true
-                    end
-                    i = ws_e + 1
+    local pending_space = ''
+    local depth = 0
+    local regions, parts = {}, {}
+    local pos = 1
+    for index, range in ipairs(M.segment_positions(str)) do
+        local raw = str:sub(range[1], range[2])
+        local segment = M.segment(raw)[1]
+        segment.raw = raw
+        regions[index] = segment
+        parts[#parts + 1] = str:sub(pos, range[1] - 1)
+        parts[#parts + 1] = '\30' .. index .. '\29'
+        pos = range[2] + 1
+    end
+    parts[#parts + 1] = str:sub(pos)
+
+    local function line_break()
+        tokens[#tokens + 1] = { kind = 'break' }
+        pending_space = ''
+    end
+    local function emit(s, styles, link)
+        local code = styles:find('code', 1, true)
+        local i = 1
+        while i <= #s do
+            local _, ws = s:find('^%s+', i)
+            local index, after = s:match('^\30(%d+)\29()', i)
+            local char = s:sub(i, i)
+            if char:match(cloze_marks) then
+                depth = cloze_depth(depth, char)
+                i = i + 1
+            elseif ws then
+                local spaces = s:sub(i, ws)
+                if spaces:find('\n', 1, true) then
+                    line_break()
                 else
-                    local e = (s:find('%s', i) or (#s + 1)) - 1
-                    tokens[#tokens + 1] = { kind = 'word', text = s:sub(i, e), space = pending_space }
-                    pending_space = false
-                    i = e + 1
+                    pending_space = code and spaces:gsub('\t', '    ') or ' '
                 end
+                i = ws + 1
+            elseif index and regions[tonumber(index)] then
+                local region = regions[tonumber(index)]
+                if code then
+                    tokens[#tokens + 1] = { kind = 'word', text = region.raw, space = pending_space, styles = styles,
+                        depth = depth, link = link }
+                else
+                    tokens[#tokens + 1] = { kind = region.display and 'display' or 'math', tex = region.tex, space = pending_space, depth = depth }
+                end
+                for mark in region.raw:gmatch(cloze_marks) do depth = cloze_depth(depth, mark) end
+                pending_space = ''
+                i = after
+            else
+                local e = (s:find('[%s\30' .. M.cloze_start .. M.cloze_end .. ']', i + 1) or (#s + 1)) - 1
+                tokens[#tokens + 1] = { kind = 'word', text = s:sub(i, e), space = pending_space, styles = styles,
+                    depth = depth, link = link }
+                pending_space = ''
+                i = e + 1
             end
         end
     end
+    local source = table.concat(parts)
+    if use_markdown then markdown.runs(source, emit, line_break) else emit(source, '') end
     return tokens
 end
 M.tokenize = tokenize
@@ -1179,89 +1250,120 @@ end
 
 -- Builds a UI column containing `text_content` wrapped to roughly `max_chars`
 -- characters per line, with any MathJax rendered in place.
-function M.create_text_node(text_content, max_chars, text_scale)
+function M.create_text_node(text_content, max_chars, text_scale, options)
+    options = options or {}
     text_scale = text_scale or 0.35
-    local colour = G.C.WHITE
+    local colour = options.colour or G.C.WHITE
     local tfont = G.LANG.font
     local mfont = M.math_font()
     local math_scale = text_scale * M.MATH_SCALE
-    local max_w = measure(string.rep('x', max_chars or 70), text_scale, tfont)
+    local max_w = options.width or measure(string.rep('x', max_chars or 70), text_scale, tfont)
     local space_w = measure(' ', text_scale, tfont)
+    local padding = 0.08 * text_scale / 0.35
 
     local lines = {}
-    local cur = { items = {}, w = 0 }
-    local function flush()
-        if #cur.items > 0 then lines[#lines + 1] = cur end
-        cur = { items = {}, w = 0 }
+    local cur = { items = {}, w = 0, h = 0 }
+    local function flush(allow_blank)
+        if #cur.items > 0 or allow_blank then lines[#lines + 1] = cur end
+        cur = { items = {}, w = 0, h = 0 }
     end
     local function place(item, space)
-        local sp = (space and #cur.items > 0) and space_w or 0
+        local keep_indent = item.styles and item.styles:find('code', 1, true)
+        local sp = (#cur.items > 0 or keep_indent) and space_w * #space or 0
         if #cur.items > 0 and cur.w + sp + item.w > max_w then
             flush()
             sp = 0
         end
-        item.space = sp > 0
+        item.gap = sp
+        item.spaces = sp > 0 and space or ''
         cur.items[#cur.items + 1] = item
         cur.w = cur.w + sp + item.w
+        cur.h = math.max(cur.h, item.h)
     end
 
-    for _, tok in ipairs(tokenize(text_content or '')) do
+    for _, tok in ipairs(tokenize(text_content or '', options.markdown)) do
         if tok.kind == 'break' then
-            flush()
+            flush(options.markdown and #lines > 0 and #lines[#lines].items > 0)
         elseif tok.kind == 'word' then
-            local font = font_has_glyphs(tfont, tok.text) and tfont or mfont
+            local font = font_has_glyphs(tfont, (tok.text:gsub(M.cloze_placeholder, '[...]'))) and tfont or mfont
             local scale = (font == tfont) and text_scale or math_scale
-            local w = measure(tok.text, scale, font)
-            place({ kind = 'text', text = tok.text, font = font, scale = scale, w = w }, tok.space)
+            if tok.styles:find('heading', 1, true) then scale = scale * 1.17 end
+            local w, h = measure(tok.text, scale, font)
+            place({ kind = 'text', text = tok.text, font = font, scale = scale, w = w, h = h, styles = tok.styles,
+                highlighted = tok.depth > 0, link = options.links and tok.link }, tok.space)
         elseif tok.kind == 'math' then
-            local box = M.render(tok.tex, math_scale, false, colour)
-            place({ kind = 'box', box = box, w = box.w }, tok.space)
+            local box = M.render(tok.tex, math_scale, false, colour, tok.depth)
+            place({ kind = 'box', box = box, w = box.w, h = box.h }, tok.space)
         elseif tok.kind == 'display' then
             flush()
-            local box = M.render(tok.tex, math_scale, true, colour)
-            lines[#lines + 1] = { display = true, items = { { kind = 'box', box = box, w = box.w } }, w = box.w }
+            local box = M.render(tok.tex, math_scale, true, colour, tok.depth)
+            lines[#lines + 1] = { display = true, items = { { kind = 'box', box = box } }, w = box.w, h = box.h }
         end
     end
     flush()
 
     local rows = {}
+    local width, height = 0, padding * 2
     for _, line in ipairs(lines) do
         local nodes = {}
         local run -- current text run being merged
         local function end_run()
             if run then
-                nodes[#nodes + 1] = { n = G.UIT.T, config = { text = run.text, scale = run.scale, colour = colour, font = run.font ~= tfont and run.font or nil, shadow = false } }
+                local styles = run.styles
+                local tint = colour
+                if run.highlighted or styles:find('link', 1, true) then tint = G.C.BLUE
+                elseif styles:find('code', 1, true) then tint = G.C.GOLD or colour
+                elseif styles:find('quote', 1, true) then tint = G.C.UI.TEXT_INACTIVE or colour end
+                for _, node in ipairs(text_nodes(run.text, run.scale, run.font, tint)) do
+                    local c = node.config
+                    c.akl_bold = styles:find('bold', 1, true)
+                    c.akl_italic = styles:find('italic', 1, true)
+                    c.akl_strike = styles:find('strike', 1, true)
+                    if c.akl_bold or c.akl_italic or c.akl_strike then c.func = 'ankilatro_style_text' end
+                    if run.link and run.link:match("^https?://") then
+                        c.button, c.hover, c.akl_link = 'ankilatro_explainer_link', true, run.link
+                    end
+                    nodes[#nodes + 1] = node
+                end
                 run = nil
             end
         end
         for _, item in ipairs(line.items) do
             if item.kind == 'text' then
-                if run and run.font == item.font then
-                    run.text = run.text .. (item.space and ' ' or '') .. item.text
+                if run and run.font == item.font and run.styles == item.styles and run.scale == item.scale and
+                    run.highlighted == item.highlighted and run.link == item.link then
+                    run.text = run.text .. item.spaces .. item.text
                 else
                     end_run()
-                    if item.space then nodes[#nodes + 1] = spacer(space_w, 0).node end
-                    run = { text = item.text, font = item.font, scale = item.scale }
+                    if item.gap > 0 then nodes[#nodes + 1] = spacer(item.gap, 0).node end
+                    run = { text = item.text, font = item.font, scale = item.scale, styles = item.styles,
+                        highlighted = item.highlighted, link = item.link }
                 end
             else
                 end_run()
-                if item.space then nodes[#nodes + 1] = spacer(space_w, 0).node end
+                if item.gap and item.gap > 0 then nodes[#nodes + 1] = spacer(item.gap, 0).node end
                 nodes[#nodes + 1] = item.box.node
             end
         end
         end_run()
+        local row_padding = line.display and padding * 0.625 or 0
+        local blank = #nodes == 0 and text_scale * 0.35 or 0
+        width = math.max(width, line.w + row_padding * 2)
+        local row_height = math.max(line.h, blank) + row_padding * 2 + padding
+        height = height + row_height
         rows[#rows + 1] = {
             n = G.UIT.R,
-            config = { align = 'cm', padding = line.display and 0.05 or 0, maxw = max_w * 1.05 },
+            config = { align = options.left and not line.display and 'cl' or 'cm', padding = row_padding,
+                minh = blank, maxw = max_w * 1.05, akl_height = row_height },
             nodes = nodes,
         }
     end
 
     return {
         n = G.UIT.C,
-        config = { align = 'cm', padding = 0.08 },
+        config = { align = options.left and 'cl' or 'cm', padding = padding },
         nodes = rows,
-    }
+    }, width + padding * 2, height
 end
 
 return M
